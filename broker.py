@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar, Callable, Optional, Generator, TypeAlias, Any, get_type_hints, get_origin, get_args, cast
+from typing import Generic, TypeVar, Callable, Optional, TypeAlias, Any, cast
 from weakref import ref, WeakMethod
 from inspect import ismethod
 from threading import Lock, Event
@@ -42,6 +42,8 @@ class MessageFuture(Generic[T]):
 
 
 class Topic(Generic[T]):
+    _executor: Executor = ThreadPoolExecutor()
+
     def __init__(self, name: str, message_type: type[T]) -> None:
         self._name: str = name
         self._message_type: type[T] = message_type
@@ -125,7 +127,7 @@ class Topic(Generic[T]):
             self._clean_dead_subscribers()
             live_subscriber = self._live_subscriber()
         for subscriber in live_subscriber:
-            subscriber(message)
+            self._executor.submit(subscriber, message)
 
     def _live_subscriber(self) -> list[SUBSCRIBER[T]]:
         all_subscribers = [r() for r in self._subscribers.values()]
@@ -140,152 +142,24 @@ class Topic(Generic[T]):
         self._dead_subscriber = True
 
 
-class Broker:
-    def __init__(self, namespace: str = '/') -> None:
-        for n, t in get_type_hints(self.__class__).items():
-            attribute_type = get_origin(t)
-            if attribute_type is None:
-                attribute_type = t
-            if issubclass(attribute_type, Broker):
-                setattr(self, n, t(namespace + n + '/'))
-            elif issubclass(attribute_type, Topic):
-                topic = Topic(namespace + n, get_args(t)[0])
-                setattr(self, n, topic)
-            else:
-                raise TypeError("Value type should be Topic[T] or BrokerType")
-
-    def __iter__(self) -> Generator[Topic, None, None]:
-        for topic_or_broker in self.__dict__.values():
-            if isinstance(topic_or_broker, Topic):
-                yield topic_or_broker
-            if isinstance(topic_or_broker, Broker):
-                yield from topic_or_broker
-
-    def __getitem__(self, topic_name: str) -> Topic:
-        for topic in self:
-            if topic.name == topic_name:
-                return topic
-        raise KeyError(topic_name)
-
-    def __setitem__(self, topic_name: str, message_type: Any) -> None:
-        paths = topic_name.split('/')
-        broker = self
-        for depth, namespace in enumerate(paths[1:-1]):
-            if hasattr(broker, namespace):
-                sub_broker = getattr(broker, namespace)
-            else:
-                sub_broker = Broker('/'.join(paths[:depth + 1]) + '/')
-                setattr(broker, namespace, sub_broker)
-            broker = sub_broker
-        setattr(broker, paths[-1], Topic[message_type](topic_name, message_type))
-
-    def __contains__(self, topic_name: str) -> bool:
-        for topic in self:
-            if topic.name == topic_name:
-                return True
-        return False
-
-
-class Subscriber(Generic[T]):
-    def __init__(self, topic: Topic[T], callback: Callable[[T], None], executor: Executor) -> None:
-        self._topic = topic
-        self._callback = callback
-        self._executor = executor
-        self.subscribe()
-
-    def __call__(self, message: T) -> None:
-        self._executor.submit(self._callback, message)
-
-    def subscribe(self) -> None:
-        self._topic.add_subscriber(self)
-
-    def unsubscribe(self) -> None:
-        self._topic.remove_subscriber(self)
-
-
-class Node:
-    broker: Broker = Broker()
-    executor: Executor = ThreadPoolExecutor()
-
-    @classmethod
-    def _ensure_topic(cls, topic_name: str, message_type: type[T]) -> Topic:
-        if topic_name not in cls.broker:
-            cls.broker[topic_name] = message_type
-        topic = cls.broker[topic_name]
-        if topic.message_type is not message_type:
-            raise TypeError(f'Message type of {topic_name} should be {message_type.__qualname__}')
-        return topic
-
-    @classmethod
-    def subscribe(cls, topic_name: str, message_type: type[T], callback: Callable[[T], None]) -> Subscriber[T]:
-        topic = cls._ensure_topic(topic_name, message_type)
-        return Subscriber(topic, callback, cls.executor)
-
-    @classmethod
-    def publish(cls, topic_name: str, message_type: type[T], message: T) -> None:
-        topic = cls._ensure_topic(topic_name, message_type)
-        topic.publish(message)
-
-
 def test_topic() -> None:
-    topic = Topic[str]('my_topic', str)
-    print(topic)
+    my_topic = Topic[str]('my_topic', str)
+    print(my_topic)
 
     def subscriber(x: str) -> None:
         print(x)
 
-    topic.add_subscriber(subscriber)
-    topic.latest_message.add_done_callback(lambda x: print(f'Done: {x}'))
+    my_topic.add_subscriber(subscriber)
+    future = my_topic.receive()
+    my_topic.latest_message.add_done_callback(lambda x: print(x))
 
-    topic.publish('hello world')
+    my_topic.publish('hello world')
+
+    print(future.result())
 
     del subscriber
-    print(f'has_subscriber: {topic.has_subscriber}')
-
-
-def test_broker() -> None:
-    class MySubBroker(Broker):
-        topic1: Topic[str]
-
-    class MyBroker(Broker):
-        sub_broker: MySubBroker
-        topic2: Topic[str]
-
-    my_broker = MyBroker()
-    my_broker['/sub_broker/topic3'] = str
-    my_broker['/sub_broker/sub_broker/topic4'] = str
-
-    print([t for t in my_broker])
-
-    def my_subscriber(message: str) -> None:
-        print(message)
-
-    my_broker.sub_broker.topic1.add_subscriber(my_subscriber)
-    my_broker.topic2.add_subscriber(my_subscriber)
-    my_broker['/sub_broker/topic3'].add_subscriber(my_subscriber)
-    my_broker['/sub_broker/sub_broker/topic4'].add_subscriber(my_subscriber)
-
-    my_broker.sub_broker.topic1.publish("hello world 1")
-    my_broker.topic2.publish("hello world 2")
-    my_broker['/sub_broker/topic3'].publish("hello world 3")
-    my_broker['/sub_broker/sub_broker/topic4'].publish("hello world 4")
-
-    del my_subscriber
-
-    print(f'has_subscriber: {any((i.has_subscriber for i in my_broker))}')
-
-
-def test_node() -> None:
-    my_node = Node()
-    subscriber1 = my_node.subscribe('/topic1', str, lambda x: my_node.publish('/topic2', str, x))
-    subscriber2 = my_node.subscribe('/topic2', str, lambda x: print(x))
-    my_node.publish('/topic1', str, 'hello world')
-    del subscriber1
-    subscriber2.unsubscribe()
-    print(f'has_subscriber: {any((i.has_subscriber for i in my_node.broker))}')
+    print(f'has_subscriber: {my_topic.has_subscriber}')
 
 
 if __name__ == '__main__':
     test_topic()
-    test_broker()
-    test_node()
