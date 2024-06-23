@@ -6,8 +6,8 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 
 
 T = TypeVar('T')
-SUBSCRIBER: TypeAlias = Callable[[T], None]
-SUBSCRIBER_ID: TypeAlias = tuple[int, int] | int
+Subscriber: TypeAlias = Callable[[T], None]
+SubscriberID: TypeAlias = tuple[int, int] | int
 
 
 class MessageFuture(Generic[T]):
@@ -32,10 +32,10 @@ class MessageFuture(Generic[T]):
             else:
                 self._done_callbacks.add(callback)
 
-    def __call__(self, result: T) -> None:
+    def __call__(self, message: T) -> None:
         with self._lock:
             if not self._event.is_set():
-                self._result = result
+                self._result = message
                 self._event.set()
                 for callback in self._done_callbacks:
                     callback(self._result)
@@ -44,27 +44,22 @@ class MessageFuture(Generic[T]):
 class Topic(Generic[T]):
     _executor: Executor = ThreadPoolExecutor()
 
-    def __init__(self, name: str, message_type: type[T]) -> None:
-        self._name: str = name
+    def __init__(self, message_type: type[T]) -> None:
         self._message_type: type[T] = message_type
-        self._subscribers: dict[SUBSCRIBER_ID, ref[SUBSCRIBER[T]]] = {}
+        self._subscribers: dict[SubscriberID, ref[Subscriber[T]]] = {}
         self._subscribers_lock: Lock = Lock()
         self._dead_subscriber: bool = False
         self._latest_message: T | None = None
         self._latest_message_lock: Lock = Lock()
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__qualname__}(name="{self.name}", message_type={self.message_type.__qualname__})'
+        return f'{self.__class__.__qualname__}(message_type={self.message_type.__qualname__})'
 
     @staticmethod
-    def _make_id(target: SUBSCRIBER[T]) -> SUBSCRIBER_ID:
+    def _make_id(target: Subscriber[T]) -> SubscriberID:
         if ismethod(target):
             return id(getattr(target, '__self__')), id(getattr(target, '__func__'))
         return id(target)
-
-    @property
-    def name(self) -> str:
-        return self._name
 
     @property
     def message_type(self) -> type[T]:
@@ -76,9 +71,9 @@ class Topic(Generic[T]):
             self._clean_dead_subscribers()
             return len(self._subscribers) > 0
 
-    def add_subscriber(self, subscriber: SUBSCRIBER[T]) -> None:
+    def add_subscriber(self, subscriber: Subscriber[T]) -> None:
         if ismethod(subscriber):
-            subscriber_ref = cast(ref[SUBSCRIBER[T]], WeakMethod(subscriber, self._remove_subscriber))
+            subscriber_ref = cast(ref[Subscriber[T]], WeakMethod(subscriber, self._remove_subscriber))
         elif callable(subscriber):
             if hasattr(subscriber, '__name__') and getattr(subscriber, '__name__') == "<lambda>":
                 raise TypeError(f"Lambda expression is unsupported")
@@ -89,7 +84,7 @@ class Topic(Generic[T]):
             self._clean_dead_subscribers()
             self._subscribers[self._make_id(subscriber)] = subscriber_ref
 
-    def remove_subscriber(self, subscriber: Optional[SUBSCRIBER[T]] = None) -> None:
+    def remove_subscriber(self, subscriber: Optional[Subscriber[T]] = None) -> None:
         with self._subscribers_lock:
             self._clean_dead_subscribers()
             if subscriber is None:
@@ -129,7 +124,7 @@ class Topic(Generic[T]):
         for subscriber in live_subscriber:
             self._executor.submit(subscriber, message)
 
-    def _live_subscriber(self) -> list[SUBSCRIBER[T]]:
+    def _live_subscriber(self) -> list[Subscriber[T]]:
         all_subscribers = [r() for r in self._subscribers.values()]
         return [r for r in all_subscribers if r is not None]
 
@@ -143,7 +138,7 @@ class Topic(Generic[T]):
 
 
 def test_topic() -> None:
-    my_topic = Topic[str]('my_topic', str)
+    my_topic: Topic[str] = Topic(str)
     print(my_topic)
 
     def subscriber(x: str) -> None:
