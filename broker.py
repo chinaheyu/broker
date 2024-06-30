@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar, Callable, Optional, TypeAlias, Any, cast
+from typing import Generic, Generator, TypeVar, Callable, Optional, TypeAlias, Any, cast, get_type_hints, get_origin, get_args
 from weakref import ref, WeakMethod
 from inspect import ismethod
 from threading import Lock, Event
@@ -15,7 +15,7 @@ class MessageFuture(Generic[T]):
         self._result: T
         self._event: Event = Event()
         self._lock: Lock = Lock()
-        self._done_callbacks: set[Callable[[T], None]] = set()
+        self._done_callbacks: set[Callable[['MessageFuture'], None]] = set()
 
     def done(self) -> bool:
         return self._event.is_set()
@@ -25,10 +25,10 @@ class MessageFuture(Generic[T]):
             return cast(T, self._result)
         raise TimeoutError()
 
-    def add_done_callback(self, callback: Callable[[T], None]) -> None:
+    def add_done_callback(self, callback: Callable[['MessageFuture'], None]) -> None:
         with self._lock:
             if self._event.is_set():
-                callback(self._result)
+                callback(self)
             else:
                 self._done_callbacks.add(callback)
 
@@ -38,7 +38,7 @@ class MessageFuture(Generic[T]):
                 self._result = message
                 self._event.set()
                 for callback in self._done_callbacks:
-                    callback(self._result)
+                    callback(self)
 
 
 class Topic(Generic[T]):
@@ -96,7 +96,7 @@ class Topic(Generic[T]):
 
     def receive(self) -> MessageFuture[T]:
         future = MessageFuture[T]()
-        future.add_done_callback(lambda _: self.remove_subscriber(future))
+        future.add_done_callback(lambda x: self.remove_subscriber(x))
         self.add_subscriber(future)
         return future
 
@@ -135,6 +135,28 @@ class Topic(Generic[T]):
 
     def _remove_subscriber(self, _subscriber_ref: Any) -> None:
         self._dead_subscriber = True
+
+
+class Broker:
+    def __init__(self) -> None:
+        for n, t in get_type_hints(self.__class__).items():
+            attribute_type = get_origin(t)
+            if attribute_type is None:
+                attribute_type = t
+            if issubclass(attribute_type, Broker):
+                setattr(self, n, attribute_type())
+            elif issubclass(attribute_type, Topic):
+                topic = attribute_type(get_args(t)[0])
+                setattr(self, n, topic)
+            else:
+                raise TypeError("Value type should be Topic[T] or Broker")
+
+    def __iter__(self) -> Generator[Topic, None, None]:
+        for topic_or_broker in self.__dict__.values():
+            if isinstance(topic_or_broker, Topic):
+                yield topic_or_broker
+            if isinstance(topic_or_broker, Broker):
+                yield from topic_or_broker
 
 
 def test_topic() -> None:
