@@ -1,13 +1,13 @@
-from typing import Generic, Generator, TypeVar, Callable, Optional, TypeAlias, Any, cast, get_type_hints, get_origin, get_args
+from typing import (Generic, Generator, TypeVar, Callable, Optional, TypeAlias, Any, cast, get_type_hints, get_origin,
+                    get_args, Union)
 from weakref import ref, WeakMethod
 from inspect import ismethod
 from threading import Lock, Event
 from concurrent.futures import Executor, ThreadPoolExecutor
 
-
 T = TypeVar('T')
 Subscriber: TypeAlias = Callable[[T], None]
-SubscriberID: TypeAlias = tuple[int, int] | int
+SubscriberID: TypeAlias = Union[tuple[int, int], int]
 
 
 class MessageFuture(Generic[T]):
@@ -49,7 +49,7 @@ class Topic(Generic[T]):
         self._subscribers: dict[SubscriberID, ref[Subscriber[T]]] = {}
         self._subscribers_lock: Lock = Lock()
         self._dead_subscriber: bool = False
-        self._latest_message: T | None = None
+        self._latest_message: Optional[T] = None
         self._latest_message_lock: Lock = Lock()
 
     def __repr__(self) -> str:
@@ -112,7 +112,8 @@ class Topic(Generic[T]):
 
     def publish(self, message: T) -> None:
         if not isinstance(message, self.message_type):
-            raise TypeError(f'Message type should be {self.message_type.__qualname__}, instead of {type(message).__qualname__}')
+            raise TypeError(
+                f'Message type should be {self.message_type.__qualname__}, instead of {type(message).__qualname__}')
         with self._latest_message_lock:
             self._latest_message = message
         self._dispatch_message(message)
